@@ -189,29 +189,37 @@ async function refresh() {
 document.getElementById('refreshBtn').addEventListener('click', refresh);
 
 // ===== Resolve channel =====
-async function resolveChannel(url) {
+async function resolveChannel(url, serverOnly = false) {
   let cleanUrl = url.trim();
   if (cleanUrl.startsWith('@')) cleanUrl = 'https://www.youtube.com/' + cleanUrl;
   if (!cleanUrl.startsWith('http')) cleanUrl = 'https://www.youtube.com/' + cleanUrl;
   cleanUrl = cleanUrl.replace('://youtube.com/', '://www.youtube.com/');
 
   let channelId = null, name = '';
+
+  // Direct channel ID in URL
   const cidMatch = cleanUrl.match(/youtube\.com\/channel\/(UC[\w-]+)/);
   if (cidMatch) {
     channelId = cidMatch[1];
-  } else {
+  }
+
+  // Client-side resolve (skip for batch)
+  if (!channelId && !serverOnly) {
     try {
       const resp = await fetch(cleanUrl);
-      const text = await resp.text();
-      for (const pat of [/"channelId":"(UC[\w-]+)"/, /"externalId":"(UC[\w-]+)"/, /"browseId":"(UC[\w-]+)"/]) {
-        const m = text.match(pat);
-        if (m) { channelId = m[1]; break; }
+      if (resp.ok) {
+        const text = await resp.text();
+        for (const pat of [/"channelId":"(UC[\w-]+)"/, /"externalId":"(UC[\w-]+)"/, /"browseId":"(UC[\w-]+)"/]) {
+          const m = text.match(pat);
+          if (m) { channelId = m[1]; break; }
+        }
+        const nm = text.match(/"ownerChannelName":"([^"]+)"/);
+        if (nm) name = nm[1];
       }
-      const nm = text.match(/"ownerChannelName":"([^"]+)"/);
-      if (nm) name = nm[1];
     } catch (e) {}
   }
 
+  // Server-side fallback (or primary for batch)
   if (!channelId) {
     try {
       const resp = await fetch(`https://lgggg.de/youtube/api/resolve?url=${encodeURIComponent(cleanUrl)}`);
@@ -220,6 +228,7 @@ async function resolveChannel(url) {
     } catch (e) {}
   }
 
+  // Get name from RSS
   if (channelId && !name) {
     try {
       const rss = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`);
@@ -295,7 +304,7 @@ async function batchAdd() {
     status.className = 'status-msg';
     status.textContent = `${i + 1} / ${lines.length}...`;
 
-    const result = await resolveChannel(lines[i]);
+    const result = await resolveChannel(lines[i], true); // server-side only
     if (result.channelId && !existing.has(result.channelId)) {
       channels.push({ channel_id: result.channelId, name: result.name, url: result.url });
       existing.add(result.channelId);
@@ -303,6 +312,8 @@ async function batchAdd() {
     } else if (!result.channelId) {
       fail++;
     }
+    // Delay between requests to avoid rate limiting
+    if (i < lines.length - 1) await new Promise(r => setTimeout(r, 800));
   }
 
   await chrome.storage.local.set({ channels });
