@@ -1,4 +1,4 @@
-// Background service worker - fetches RSS and manages badge
+// Background service worker - fetches RSS via offscreen document and manages badge
 
 const ALARM_NAME = 'yt-check';
 const CHECK_INTERVAL = 30; // minutes
@@ -7,14 +7,13 @@ const SERVER_API = 'https://lgggg.de/youtube/api';
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: CHECK_INTERVAL });
 
-  // Import preset channels on first install
   const { channels } = await chrome.storage.local.get('channels');
   if (!channels || !channels.length) {
     try {
       const resp = await fetch(chrome.runtime.getURL('preset-channels.json'));
       const preset = await resp.json();
       if (preset.length) await chrome.storage.local.set({ channels: preset });
-    } catch (e) { /* no preset */ }
+    } catch (e) {}
   }
 
   checkUpdates();
@@ -24,7 +23,44 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === ALARM_NAME) checkUpdates();
 });
 
-async function fetchRSS(channelId) {
+// Ensure offscreen document exists
+let creatingOffscreen;
+async function ensureOffscreen() {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+  });
+  if (contexts.length) return;
+
+  if (creatingOffscreen) {
+    await creatingOffscreen;
+  } else {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['DOM_PARSER'],
+      justification: 'Fetch YouTube RSS feeds with browser cookies',
+    });
+    await creatingOffscreen;
+    creatingOffscreen = null;
+  }
+}
+
+async function fetchRSSViaOffscreen(channelId) {
+  await ensureOffscreen();
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ action: 'fetchRSS', channelId }, (resp) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else if (resp && resp.ok) {
+        resolve(resp.data);
+      } else {
+        reject(new Error(resp ? resp.error : 'No response'));
+      }
+    });
+  });
+}
+
+// Direct fetch as backup
+async function fetchRSSDirect(channelId) {
   const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -39,45 +75,60 @@ async function checkUpdates() {
 
   const cutoff = Date.now() - days * 24 * 3600 * 1000;
   let allVideos = [];
-  let clientFails = 0;
+  let failCount = 0;
 
-  // Try client-side RSS first
   for (const ch of channels) {
+    let xml = null;
+
+    // Try offscreen first (has cookies)
     try {
-      const xml = await fetchRSS(ch.channel_id);
+      xml = await fetchRSSViaOffscreen(ch.channel_id);
+    } catch (e) {
+      console.log(`[YT-Sub] Offscreen fail for ${ch.name}: ${e.message}`);
+    }
+
+    // Fallback to direct fetch
+    if (!xml) {
+      try {
+        xml = await fetchRSSDirect(ch.channel_id);
+      } catch (e) {
+        console.log(`[YT-Sub] Direct fail for ${ch.name}: ${e.message}`);
+      }
+    }
+
+    if (xml) {
       const videos = parseRSS(xml, ch, cutoff);
       allVideos.push(...videos);
-    } catch (e) {
-      clientFails++;
-      console.log(`[YT-Sub] RSS fail for ${ch.name} (${ch.channel_id}): ${e.message}`);
+    } else {
+      failCount++;
     }
   }
 
-  console.log(`[YT-Sub] RSS results: ${allVideos.length} videos, ${clientFails}/${channels.length} failed`);
+  console.log(`[YT-Sub] Results: ${allVideos.length} videos, ${failCount}/${channels.length} failed`);
 
-  // If too many client failures, fallback to server
-  if (clientFails > channels.length * 0.5) {
+  // Server fallback if most failed
+  if (failCount > channels.length * 0.5 && channels.length > 0) {
     try {
-      // Build server request with channel IDs
       const ids = channels.map(ch => ch.channel_id).join(',');
       const resp = await fetch(`${SERVER_API}/feed?ids=${encodeURIComponent(ids)}&days=${days}`);
       if (resp.ok) {
         const data = await resp.json();
-        if (data.videos && data.videos.length) {
+        if (data.videos && data.videos.length > allVideos.length) {
           allVideos = data.videos;
+          console.log(`[YT-Sub] Server fallback: ${allVideos.length} videos`);
         }
       }
-    } catch (e) { /* keep whatever we got from client */ }
+    } catch (e) {
+      console.log(`[YT-Sub] Server fallback failed: ${e.message}`);
+    }
   }
 
   allVideos.sort((a, b) => b.publishedTs - a.publishedTs);
-  // Deduplicate by videoId
   const seen = new Set();
   allVideos = allVideos.filter(v => { if (seen.has(v.videoId)) return false; seen.add(v.videoId); return true; });
 
   await chrome.storage.local.set({ videos: allVideos, lastCheck: Date.now() });
 
-  // Badge
   const { seen: seenIds = [] } = await chrome.storage.local.get('seen');
   const seenSet = new Set(seenIds);
   const unseen = allVideos.filter(v => !seenSet.has(v.videoId)).length;
@@ -110,10 +161,10 @@ function parseRSS(xml, channel, cutoff) {
   return videos;
 }
 
-// Listen for messages from popup
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'refresh') {
     checkUpdates().then(() => sendResponse({ ok: true })).catch(() => sendResponse({ ok: false }));
     return true;
   }
+  // Don't handle fetchRSS here - that's for offscreen document
 });
