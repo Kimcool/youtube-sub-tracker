@@ -1,7 +1,7 @@
 // Background service worker - fetches videos via server API + client RSS fallback
 
 const ALARM_NAME = 'yt-check';
-const CHECK_INTERVAL = 30; // minutes
+const CHECK_INTERVAL = 360; // 6 hours - just keep service worker alive, actual data from server on demand
 const SERVER_API = 'https://lgggg.de/youtube/api';
 
 chrome.runtime.onInstalled.addListener(async () => {
