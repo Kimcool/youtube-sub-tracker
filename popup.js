@@ -349,6 +349,31 @@ async function loadChannels() {
   });
 }
 
+// ===== Fix channel names via server =====
+async function fixChannelNames() {
+  const { channels = [] } = await chrome.storage.local.get('channels');
+  let fixed = 0;
+  
+  for (const ch of channels) {
+    if (ch.name.startsWith('UC') || ch.name.includes('Error') || ch.name.includes('!!1')) {
+      try {
+        const resp = await fetch(`https://lgggg.de/youtube/api/resolve?url=https://www.youtube.com/channel/${ch.channel_id}`);
+        const data = await resp.json();
+        if (data.name && !data.name.startsWith('UC')) {
+          ch.name = data.name;
+          fixed++;
+        }
+      } catch (e) {}
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  
+  if (fixed > 0) {
+    await chrome.storage.local.set({ channels });
+  }
+  return fixed;
+}
+
 // ===== Init =====
 async function init() {
   const { theme = 'light', lang, days = 3 } = await chrome.storage.local.get(['theme', 'lang', 'days']);
@@ -361,5 +386,8 @@ async function init() {
   document.getElementById('daysSelect').value = String(days);
   applyI18n();
   loadVideos();
+
+  // Auto-fix bad channel names in background
+  fixChannelNames().then(n => { if (n > 0) { loadVideos(); } });
 }
 init();
