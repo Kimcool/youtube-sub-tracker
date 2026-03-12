@@ -3,7 +3,7 @@
   "name": "YouTube Sub Tracker",
   "description": "Track recent videos from your YouTube subscriptions",
   "version": "1.0.0",
-  "permissions": ["storage", "alarms", "offscreen"],
+  "permissions": ["storage", "alarms"],
   "host_permissions": ["https://www.youtube.com/*", "https://youtube.com/*", "https://lgggg.de/*"],
   "background": {
     "service_worker": "background.js"
